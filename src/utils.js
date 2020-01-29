@@ -1,50 +1,189 @@
 import React from 'react'
+import { defaultColumn } from './publicUtils'
+
+export * from './publicUtils'
+
+// Find the depth of the columns
+export function findMaxDepth(columns, depth = 0) {
+  return columns.reduce((prev, curr) => {
+    if (curr.columns) {
+      return Math.max(prev, findMaxDepth(curr.columns, depth + 1))
+    }
+    return depth
+  }, 0)
+}
+
+function decorateColumn(column, userDefaultColumn, parent, depth, index) {
+  // Apply the userDefaultColumn
+  column = { ...defaultColumn, ...userDefaultColumn, ...column }
+
+  // First check for string accessor
+  let { id, accessor, Header } = column
+
+  if (typeof accessor === 'string') {
+    id = id || accessor
+    const accessorPath = accessor.split('.')
+    accessor = row => getBy(row, accessorPath)
+  }
+
+  if (!id && typeof Header === 'string' && Header) {
+    id = Header
+  }
+
+  if (!id && column.columns) {
+    console.error(column)
+    throw new Error('A column ID (or unique "Header" value) is required!')
+  }
+
+  if (!id) {
+    console.error(column)
+    throw new Error('A column ID (or string accessor) is required!')
+  }
+
+  column = {
+    // Make sure there is a fallback header, just in case
+    Header: () => <>&nbsp;</>,
+    Footer: () => <>&nbsp;</>,
+    ...column,
+    // Materialize and override this stuff
+    id,
+    accessor,
+    parent,
+    depth,
+    index,
+  }
+
+  return column
+}
+
+// Build the visible columns, headers and flat column list
+export function decorateColumnTree(columns, defaultColumn, parent, depth = 0) {
+  return columns.map((column, columnIndex) => {
+    column = decorateColumn(column, defaultColumn, parent, depth, columnIndex)
+    if (column.columns) {
+      column.columns = decorateColumnTree(
+        column.columns,
+        defaultColumn,
+        column,
+        depth + 1
+      )
+    }
+    return column
+  })
+}
+
+// Build the header groups from the bottom up
+export function makeHeaderGroups(flatColumns, defaultColumn) {
+  const headerGroups = []
+
+  // Build each header group from the bottom up
+  const buildGroup = (columns, depth) => {
+    const headerGroup = {
+      headers: [],
+    }
+
+    const parentColumns = []
+
+    // Do any of these columns have parents?
+    const hasParents = columns.some(col => col.parent)
+
+    columns.forEach(column => {
+      // Are we the first column in this group?
+      const isFirst = !parentColumns.length
+
+      // What is the latest (last) parent column?
+      let latestParentColumn = [...parentColumns].reverse()[0]
+
+      // If the column has a parent, add it if necessary
+      if (column.parent) {
+        const similarParentColumns = parentColumns.filter(
+          d => d.originalId === column.parent.id
+        )
+        if (isFirst || latestParentColumn.originalId !== column.parent.id) {
+          parentColumns.push({
+            ...column.parent,
+            originalId: column.parent.id,
+            id: [column.parent.id, similarParentColumns.length].join('_'),
+          })
+        }
+      } else if (hasParents) {
+        // If other columns have parents, we'll need to add a place holder if necessary
+        const originalId = [column.id, 'placeholder'].join('_')
+        const similarParentColumns = parentColumns.filter(
+          d => d.originalId === originalId
+        )
+        const placeholderColumn = decorateColumn(
+          {
+            originalId,
+            id: [column.id, 'placeholder', similarParentColumns.length].join(
+              '_'
+            ),
+            placeholderOf: column,
+          },
+          defaultColumn
+        )
+        if (
+          isFirst ||
+          latestParentColumn.originalId !== placeholderColumn.originalId
+        ) {
+          parentColumns.push(placeholderColumn)
+        }
+      }
+
+      // Establish the new headers[] relationship on the parent
+      if (column.parent || hasParents) {
+        latestParentColumn = [...parentColumns].reverse()[0]
+        latestParentColumn.headers = latestParentColumn.headers || []
+        if (!latestParentColumn.headers.includes(column)) {
+          latestParentColumn.headers.push(column)
+        }
+      }
+
+      column.totalHeaderCount = column.headers
+        ? column.headers.reduce(
+            (sum, header) => sum + header.totalHeaderCount,
+            0
+          )
+        : 1 // Leaf node columns take up at least one count
+      headerGroup.headers.push(column)
+    })
+
+    headerGroups.push(headerGroup)
+
+    if (parentColumns.length) {
+      buildGroup(parentColumns, depth + 1)
+    }
+  }
+
+  buildGroup(flatColumns, 0)
+
+  return headerGroups.reverse()
+}
+
+const pathObjCache = new Map()
 
 export function getBy(obj, path, def) {
   if (!path) {
     return obj
   }
-  const pathObj = makePathArray(path)
+  const cacheKey = typeof path === 'function' ? path : JSON.stringify(path)
+
+  const pathObj =
+    pathObjCache.get(cacheKey) ||
+    (() => {
+      const pathObj = makePathArray(path)
+      pathObjCache.set(cacheKey, pathObj)
+      return pathObj
+    })()
+
   let val
+
   try {
     val = pathObj.reduce((cursor, pathPart) => cursor[pathPart], obj)
   } catch (e) {
     // continue regardless of error
   }
   return typeof val !== 'undefined' ? val : def
-}
-
-export function defaultOrderByFn(arr, funcs, dirs) {
-  return [...arr].sort((rowA, rowB) => {
-    for (let i = 0; i < funcs.length; i += 1) {
-      const sortFn = funcs[i]
-      const desc = dirs[i] === false || dirs[i] === 'desc'
-      const sortInt = sortFn(rowA, rowB)
-      if (sortInt !== 0) {
-        return desc ? -sortInt : sortInt
-      }
-    }
-    return dirs[0] ? rowA.index - rowB.index : rowB.index - rowA.index
-  })
-}
-
-export function defaultSortByFn(a, b, desc) {
-  // force null and undefined to the bottom
-  a = a === null || a === undefined ? '' : a
-  b = b === null || b === undefined ? '' : b
-  // force any string values to lowercase
-  a = typeof a === 'string' ? a.toLowerCase() : a
-  b = typeof b === 'string' ? b.toLowerCase() : b
-  // Return either 1 or -1 to indicate a sort priority
-  if (a > b) {
-    return 1
-  }
-  if (a < b) {
-    return -1
-  }
-  // returning 0, undefined or any falsey value will defer to the next
-  // sorting mechanism or eventually the columns index via the orderByFn
-  return 0
 }
 
 export function getFirstDefined(...args) {
@@ -55,51 +194,16 @@ export function getFirstDefined(...args) {
   }
 }
 
-export function defaultGroupByFn(rows, grouper) {
-  return rows.reduce((prev, row, i) => {
-    const resKey =
-      typeof grouper === 'function'
-        ? grouper(row.values, i)
-        : row.values[grouper]
-    prev[resKey] = Array.isArray(prev[resKey]) ? prev[resKey] : []
-    prev[resKey].push(row)
-    return prev
-  }, {})
-}
-
-export function defaultFilterFn(row, id, value, column) {
-  return row.values[id] !== undefined
-    ? String(row.values[id])
-      .toLowerCase()
-      .includes(String(value).toLowerCase())
-    : true
-}
-
-export function setBy(obj = {}, path, value) {
-  const recurse = (obj, depth = 0) => {
-    const key = path[depth]
-    const target = typeof obj[key] !== 'object' ? {} : obj[key]
-    const subValue =
-      depth === path.length - 1 ? value : recurse(target, depth + 1)
-    return {
-      ...obj,
-      [key]: subValue
-    }
-  }
-
-  return recurse(obj)
-}
-
 export function getElementDimensions(element) {
   const rect = element.getBoundingClientRect()
   const style = window.getComputedStyle(element)
   const margins = {
     left: parseInt(style.marginLeft),
-    right: parseInt(style.marginRight)
+    right: parseInt(style.marginRight),
   }
   const padding = {
     left: parseInt(style.paddingLeft),
-    right: parseInt(style.paddingRight)
+    right: parseInt(style.paddingRight),
   }
   return {
     left: Math.ceil(rect.left),
@@ -111,63 +215,89 @@ export function getElementDimensions(element) {
     marginRight: margins.right,
     paddingLeft: padding.left,
     paddingRight: padding.right,
-    scrollWidth: element.scrollWidth
+    scrollWidth: element.scrollWidth,
   }
 }
 
-export function flexRender(Comp, props) {
-  if (typeof Comp === 'function') {
-    return Object.getPrototypeOf(Comp).isReactComponent ? (
-      <Comp {...props} />
-    ) : (
-      Comp(props)
-    )
+export function isFunction(a) {
+  if (typeof a === 'function') {
+    return a
   }
-  return Comp
 }
 
-export const mergeProps = (...groups) => {
-  let props = {}
-  groups.forEach(({ style = {}, className, ...rest } = {}) => {
-    props = {
-      ...props,
-      ...rest,
-      style: {
-        ...(props.style || {}),
-        ...style
-      },
-      className: [props.className, className].filter(Boolean).join(' ')
+export function flattenBy(columns, childKey) {
+  const flatColumns = []
+
+  const recurse = columns => {
+    columns.forEach(d => {
+      if (!d[childKey]) {
+        flatColumns.push(d)
+      } else {
+        recurse(d[childKey])
+      }
+    })
+  }
+
+  recurse(columns)
+
+  return flatColumns
+}
+
+export function expandRows(
+  rows,
+  { manualExpandedKey, expanded, expandSubRows = true }
+) {
+  const expandedRows = []
+
+  const handleRow = row => {
+    row.isExpanded =
+      (row.original && row.original[manualExpandedKey]) || expanded[row.id]
+
+    row.canExpand = row.subRows && !!row.subRows.length
+
+    expandedRows.push(row)
+
+    if (expandSubRows && row.subRows && row.subRows.length && row.isExpanded) {
+      row.subRows.forEach(handleRow)
     }
-  })
-  return props
-}
-
-export const applyHooks = (hooks, initial, ...args) =>
-  hooks.reduce((prev, next) => next(prev, ...args), initial)
-
-export const applyPropHooks = (hooks, ...args) =>
-  hooks.reduce((prev, next) => mergeProps(prev, next(...args)), {})
-
-export const warnUnknownProps = props => {
-  if (Object.keys(props).length) {
-    throw new Error(
-      `Unknown options passed to useReactTable:
-      
-${JSON.stringify(props, null, 2)}`
-    )
   }
+
+  rows.forEach(handleRow)
+
+  return expandedRows
 }
 
-export function sum(arr) {
-  return arr.reduce((prev, curr) => prev + curr, 0)
+export function getFilterMethod(filter, userFilterTypes, filterTypes) {
+  return (
+    isFunction(filter) ||
+    userFilterTypes[filter] ||
+    filterTypes[filter] ||
+    filterTypes.text
+  )
 }
+
+export function shouldAutoRemoveFilter(autoRemove, value) {
+  return autoRemove ? autoRemove(value) : typeof value === 'undefined'
+}
+
+//
+
+const reOpenBracket = /\[/g
+const reCloseBracket = /\]/g
 
 function makePathArray(obj) {
-  return flattenDeep(obj)
-    .join('.')
-    .replace(/\[/g, '.')
-    .replace(/\]/g, '')
-    .split('.')
+  return (
+    flattenDeep(obj)
+      // remove all periods in parts
+      .map(d => String(d).replace('.', '_'))
+      // join parts using period
+      .join('.')
+      // replace brackets with periods
+      .replace(reOpenBracket, '.')
+      .replace(reCloseBracket, '')
+      // split it back out on periods
+      .split('.')
+  )
 }
 
 function flattenDeep(arr, newArr = []) {
